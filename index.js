@@ -1,20 +1,18 @@
-require('dotenv').config();
 const express = require('express');
 const multer = require('multer');
 const { Octokit } = require('@octokit/rest');
 const cron = require('node-cron');
-const path = require('path');
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 
 // ========================================
-// KONFIGURASI - ISI DENGAN DATA ANDA
+// KONFIGURASI - DARI ENVIRONMENT VARIABLES
 // ========================================
-const  TOKEN = process.env.TOKEN; // Personal Access Token
-const  OWNER = process.env.OWNER; // Username GitHub
-const  REPO = process.env.REPO; // Nama repository
-const  BRANCH = 'main'; // Branch yang digunakan
+const TOKEN = process.env.TOKEN;
+const OWNER = process.env.OWNER;
+const REPO = process.env.REPO;
+const BRANCH = 'main';
 
 const octokit = new Octokit({ auth: TOKEN });
 
@@ -25,15 +23,15 @@ async function uploadToGitHub(fileName, fileContent) {
   
   try {
     const response = await octokit.repos.createOrUpdateFileContents({
-      owner:  OWNER,
-      repo:  REPO,
+      owner: OWNER,
+      repo: REPO,
       path: filePath,
       message: `Upload ${fileName} - expires in 24h`,
       content: fileContent.toString('base64'),
-      branch:  BRANCH
+      branch: BRANCH
     });
 
-    const fileUrl = `https://raw.githubusercontent.com/${ OWNER}/${ REPO}/${ BRANCH}/${filePath}`;
+    const fileUrl = `https://raw.githubusercontent.com/${OWNER}/${REPO}/${BRANCH}/${filePath}`;
     
     return {
       success: true,
@@ -51,21 +49,20 @@ async function uploadToGitHub(fileName, fileContent) {
 // Fungsi untuk menghapus file dari GitHub
 async function deleteFromGitHub(filePath) {
   try {
-    // Dapatkan SHA file terlebih dahulu
     const { data } = await octokit.repos.getContent({
-      owner:  OWNER,
-      repo:  REPO,
+      owner: OWNER,
+      repo: REPO,
       path: filePath,
-      branch:  BRANCH
+      branch: BRANCH
     });
 
     await octokit.repos.deleteFile({
-      owner:  OWNER,
-      repo:  REPO,
+      owner: OWNER,
+      repo: REPO,
       path: filePath,
       message: `Auto-delete expired file: ${filePath}`,
       sha: data.sha,
-      branch:  BRANCH
+      branch: BRANCH
     });
 
     console.log(`Deleted: ${filePath}`);
@@ -80,16 +77,16 @@ async function deleteFromGitHub(filePath) {
 async function getTempFiles() {
   try {
     const { data } = await octokit.repos.getContent({
-      owner:  OWNER,
-      repo:  REPO,
+      owner: OWNER,
+      repo: REPO,
       path: 'temp',
-      branch:  BRANCH
+      branch: BRANCH
     });
 
     return Array.isArray(data) ? data : [data];
   } catch (error) {
     if (error.status === 404) {
-      return []; // Folder belum ada
+      return [];
     }
     throw error;
   }
@@ -98,23 +95,39 @@ async function getTempFiles() {
 // Fungsi untuk membersihkan file yang sudah expired
 async function cleanupExpiredFiles() {
   console.log('Running cleanup task...');
-  const files = await getTempFiles();
-  const now = Date.now();
-  const oneDayInMs = 24 * 60 * 60 * 1000;
+  try {
+    const files = await getTempFiles();
+    const now = Date.now();
+    const oneDayInMs = 24 * 60 * 60 * 1000;
 
-  for (const file of files) {
-    // Extract timestamp dari nama file
-    const match = file.name.match(/^(\d+)_/);
-    if (match) {
-      const fileTimestamp = parseInt(match[1]);
-      const age = now - fileTimestamp;
+    for (const file of files) {
+      const match = file.name.match(/^(\d+)_/);
+      if (match) {
+        const fileTimestamp = parseInt(match[1]);
+        const age = now - fileTimestamp;
 
-      if (age > oneDayInMs) {
-        await deleteFromGitHub(file.path);
+        if (age > oneDayInMs) {
+          await deleteFromGitHub(file.path);
+        }
       }
     }
+  } catch (error) {
+    console.error('Cleanup error:', error.message);
   }
 }
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    config: {
+      owner: OWNER ? '✓' : '✗',
+      repo: REPO ? '✓' : '✗',
+      token: TOKEN ? '✓' : '✗'
+    }
+  });
+});
 
 // Endpoint untuk upload file
 app.post('/upload', upload.single('file'), async (req, res) => {
@@ -133,6 +146,7 @@ app.post('/upload', upload.single('file'), async (req, res) => {
       size: req.file.size
     });
   } catch (error) {
+    console.error('Upload error:', error);
     res.status(500).json({ 
       error: 'Failed to upload file',
       details: error.message 
@@ -144,7 +158,6 @@ app.post('/upload', upload.single('file'), async (req, res) => {
 app.get('/files', async (req, res) => {
   try {
     const files = await getTempFiles();
-    const now = Date.now();
 
     const fileList = files.map(file => {
       const match = file.name.match(/^(\d+)_(.+)$/);
@@ -152,7 +165,7 @@ app.get('/files', async (req, res) => {
         const timestamp = parseInt(match[1]);
         const originalName = match[2];
         const expiresAt = new Date(timestamp + 24 * 60 * 60 * 1000);
-        const url = `https://raw.githubusercontent.com/${ OWNER}/${ REPO}/${ BRANCH}/${file.path}`;
+        const url = `https://raw.githubusercontent.com/${OWNER}/${REPO}/${BRANCH}/${file.path}`;
 
         return {
           name: originalName,
@@ -167,6 +180,7 @@ app.get('/files', async (req, res) => {
 
     res.json({ files: fileList });
   } catch (error) {
+    console.error('Files list error:', error);
     res.status(500).json({ 
       error: 'Failed to fetch files',
       details: error.message 
@@ -255,26 +269,23 @@ cron.schedule('0 * * * *', () => {
   cleanupExpiredFiles();
 });
 
-// Jalankan cleanup saat startup
-cleanupExpiredFiles();
-
+// Server startup
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`✅ Server running on port ${PORT}`);
   console.log('GitHub configuration:');
-  console.log(`- Owner: ${ OWNER}`);
-  console.log(`- Repo: ${ REPO}`);
-  console.log(`- Branch: ${ BRANCH}`);
+  console.log(`- Owner: ${OWNER || '❌ NOT SET'}`);
+  console.log(`- Repo: ${REPO || '❌ NOT SET'}`);
+  console.log(`- Branch: ${BRANCH}`);
+  console.log(`- Token: ${TOKEN ? '✓ Set' : '❌ NOT SET'}`);
   
-  // Validasi konfigurasi
-  if ( TOKEN === 'YOUR_ TOKEN_HERE' || 
-       OWNER === 'YOUR_ USERNAME' || 
-       REPO === 'YOUR_REPO_NAME') {
-    console.log('\n⚠️  WARNING: Silakan isi konfigurasi GitHub di bagian atas file!');
-    console.log('1.  TOKEN - Personal Access Token dari GitHub');
-    console.log('2.  OWNER - Username GitHub Anda');
-    console.log('3.  REPO - Nama repository untuk menyimpan file');
+  if (!TOKEN || !OWNER || !REPO) {
+    console.error('\n⚠️  ERROR: Missing environment variables!');
+    console.error('Please set: TOKEN, OWNER, REPO in Railway dashboard');
   } else {
-    console.log('✅ GitHub configuration loaded successfully');
+    console.log('✅ All configurations loaded');
+    // Jalankan cleanup saat startup
+    cleanupExpiredFiles();
   }
 });
